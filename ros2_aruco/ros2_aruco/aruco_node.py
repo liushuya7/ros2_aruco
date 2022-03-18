@@ -98,6 +98,12 @@ class ArucoNode(rclpy.node.Node):
 
     def info_callback(self, info_msg):
         self.info_msg = info_msg
+    #     1.0e+03 *
+
+    # 1.3764         0         0
+    #      0    1.3800         0
+    # 0.9781    0.5362    0.0010
+        update_k = np.array([1.3764e3,0,0,0, 1.3800e3, 0, 0.9781e3 ,   0.5362e3 ,   1]
         self.intrinsic_mat = np.reshape(np.array(self.info_msg.k), (3, 3))
         self.distortion = np.array(self.info_msg.d)
         # Assume that camera parameters will remain the same...
