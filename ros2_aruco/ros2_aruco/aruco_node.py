@@ -51,7 +51,7 @@ class ArucoNode(rclpy.node.Node):
 
         # Declare and read parameters
         self.declare_parameter("marker_size", .10)
-        self.declare_parameter("aruco_dictionary_id", "DICT_5X5_250")
+        self.declare_parameter("aruco_dictionary_id", "DICT_4X4_250")
         self.declare_parameter("image_topic", "/camera/color/image_raw")
         self.declare_parameter("camera_info_topic", "/camera/color/camera_info")
         self.declare_parameter("camera_frame", "marker_frame")
@@ -93,6 +93,7 @@ class ArucoNode(rclpy.node.Node):
         self.distortion = None
 
         self.aruco_dictionary = cv2.aruco.Dictionary_get(dictionary_id)
+        self.board = cv2.aruco.CharucoBoard_create(5, 6, 2, 1.6, self.aruco_dictionary)
         self.aruco_parameters = cv2.aruco.DetectorParameters_create()
         self.bridge = CvBridge()
 
@@ -103,11 +104,45 @@ class ArucoNode(rclpy.node.Node):
     # 1.3764         0         0
     #      0    1.3800         0
     # 0.9781    0.5362    0.0010
-        update_k = np.array([1.3764e3,0,0,0, 1.3800e3, 0, 0.9781e3 ,   0.5362e3 ,   1]
+        update_k = np.array([1.3764e3,0,0,0, 1.3800e3, 0, 0.9781e3 ,   0.5362e3 ,   1])
         self.intrinsic_mat = np.reshape(np.array(self.info_msg.k), (3, 3))
         self.distortion = np.array(self.info_msg.d)
         # Assume that camera parameters will remain the same...
         self.destroy_subscription(self.info_sub)
+
+    def read_chessboards(self, images):
+        """
+        Charuco base pose estimation.
+        """
+        print("POSE ESTIMATION STARTS:")
+        allCorners = []
+        allIds = []
+        decimator = 0
+        # SUB PIXEL CORNER DETECTION CRITERION
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.00001)
+
+        for im in images:
+            print("=> Processing image {0}".format(im))
+            frame = cv2.imread(im)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, rejectedImgPoints = cv2.aruco.detectMarkers(gray, self.aruco_dictionary,parameters=self.aruco_parameters)
+
+            if len(corners)>0:
+                # SUB PIXEL DETECTION
+                for corner in corners:
+                    cv2.cornerSubPix(gray, corner,
+                                    winSize = (3,3),
+                                    zeroZone = (-1,-1),
+                                    criteria = criteria)
+                res2 = cv2.aruco.interpolateCornersCharuco(corners,ids,gray,self.board)
+                if res2[1] is not None and res2[2] is not None and len(res2[1])>3 and decimator%1==0:
+                    allCorners.append(res2[1])
+                    allIds.append(res2[2])
+
+            decimator+=1
+
+        imsize = gray.shape
+        return allCorners,allIds,imsize
 
     def tf2_image_callback(self, img_msg):
         if self.info_msg is None:
