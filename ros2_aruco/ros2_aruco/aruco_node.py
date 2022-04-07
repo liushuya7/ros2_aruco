@@ -50,7 +50,7 @@ class ArucoNode(rclpy.node.Node):
         super().__init__('aruco_node')
 
         # Declare and read parameters
-        self.declare_parameter("marker_size", .10)
+        self.declare_parameter("marker_size", .016)
         self.declare_parameter("aruco_dictionary_id", "DICT_4X4_250")
         self.declare_parameter("image_topic", "/camera/color/image_raw")
         self.declare_parameter("camera_info_topic", "/camera/color/camera_info")
@@ -80,7 +80,7 @@ class ArucoNode(rclpy.node.Node):
                                                  qos_profile_sensor_data)
 
         self.create_subscription(Image, image_topic,
-                                 self.tf2_image_callback, qos_profile_sensor_data)
+                                 self.tf2_charuco_callback, qos_profile_sensor_data)
 
         # Set up publishers
         self._tf_publisher = StaticTransformBroadcaster(self)
@@ -93,7 +93,7 @@ class ArucoNode(rclpy.node.Node):
         self.distortion = None
 
         self.aruco_dictionary = cv2.aruco.Dictionary_get(dictionary_id)
-        self.board = cv2.aruco.CharucoBoard_create(5, 6, 2, 1.6, self.aruco_dictionary)
+        self.board = cv2.aruco.CharucoBoard_create(6, 5, 0.02, 0.016, self.aruco_dictionary)
         self.aruco_parameters = cv2.aruco.DetectorParameters_create()
         self.bridge = CvBridge()
 
@@ -110,39 +110,69 @@ class ArucoNode(rclpy.node.Node):
         # Assume that camera parameters will remain the same...
         self.destroy_subscription(self.info_sub)
 
-    def read_chessboards(self, images):
+    def tf2_charuco_callback(self, img_msg):
         """
         Charuco base pose estimation.
         """
-        print("POSE ESTIMATION STARTS:")
-        allCorners = []
-        allIds = []
-        decimator = 0
+        if self.info_msg is None:
+            self.get_logger().warn("No camera info has been received!")
+            return
+        cv_image = self.bridge.imgmsg_to_cv2(img_msg,
+                                             desired_encoding='mono8')
+        
+        markers = ArucoMarkers()
+        static_transformStamped = TransformStamped()
+        if self.camera_frame is None:
+            static_transformStamped.header.frame_id = self.camera_base_frame
+            markers.header.frame_id = self.info_msg.header.frame_id
+            static_transformStamped.child_frame_id = self.info_msg.header.frame_id
+        else:
+            markers.header.frame_id = self.camera_frame
+            static_transformStamped.header.frame_id = self.camera_base_frame
+            static_transformStamped.child_frame_id = self.camera_frame
+        markers.header.stamp = img_msg.header.stamp
+        static_transformStamped.header.stamp = img_msg.header.stamp
+        # cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        corners, marker_ids, rejected = cv2.aruco.detectMarkers(cv_image,
+                                                                self.aruco_dictionary,
+                                                                parameters=self.aruco_parameters)
+        cv2.aruco.refineDetectedMarkers(cv_image, self.board, corners, marker_ids, rejected)
+        # self.get_logger().info("POSE ESTIMATION STARTS:")
+     
         # SUB PIXEL CORNER DETECTION CRITERION
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.00001)
+        
+        if len(corners)>0:
+            # SUB PIXEL DETECTION
+            for corner in corners:
+                cv2.cornerSubPix(cv_image, corner,
+                                winSize = (3,3),
+                                zeroZone = (-1,-1),
+                                criteria = criteria) 
+            charucoretval, charucoCorners, charucoIds = cv2.aruco.interpolateCornersCharuco(corners,marker_ids,cv_image,self.board)
+           
+            ret, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(charucoCorners,
+                                                                 charucoIds,
+                                                                 self.board,
+                                                                 self.intrinsic_mat,
+                                                                 self.distortion, None, None)
+            if ret: 
+                print(ret,"rotaion vector:", rvec.shape, ", translation vector:", tvec.shape)
+                print("rotaion vector:", rvec[0],rvec[1],rvec[2], ", translation vector:", tvec[0],tvec[1],tvec[2])
+                static_transformStamped.transform.translation.x = tvec[0][0]
+                static_transformStamped.transform.translation.y = tvec[1][0]
+                static_transformStamped.transform.translation.z = tvec[2][0]
 
-        for im in images:
-            print("=> Processing image {0}".format(im))
-            frame = cv2.imread(im)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            corners, ids, rejectedImgPoints = cv2.aruco.detectMarkers(gray, self.aruco_dictionary,parameters=self.aruco_parameters)
+                rot_matrix = np.eye(4)
+                rot_matrix[0:3, 0:3] = cv2.Rodrigues(np.array(rvec))[0]
+                quat = transformations.quaternion_from_matrix(rot_matrix)
 
-            if len(corners)>0:
-                # SUB PIXEL DETECTION
-                for corner in corners:
-                    cv2.cornerSubPix(gray, corner,
-                                    winSize = (3,3),
-                                    zeroZone = (-1,-1),
-                                    criteria = criteria)
-                res2 = cv2.aruco.interpolateCornersCharuco(corners,ids,gray,self.board)
-                if res2[1] is not None and res2[2] is not None and len(res2[1])>3 and decimator%1==0:
-                    allCorners.append(res2[1])
-                    allIds.append(res2[2])
-
-            decimator+=1
-
-        imsize = gray.shape
-        return allCorners,allIds,imsize
+                static_transformStamped.transform.rotation.x = quat[0]
+                static_transformStamped.transform.rotation.y = quat[1]
+                static_transformStamped.transform.rotation.z = quat[2]
+                static_transformStamped.transform.rotation.w = quat[3]
+                
+                self._tf_publisher.sendTransform(static_transformStamped)
 
     def tf2_image_callback(self, img_msg):
         if self.info_msg is None:
@@ -166,6 +196,8 @@ class ArucoNode(rclpy.node.Node):
         corners, marker_ids, rejected = cv2.aruco.detectMarkers(cv_image,
                                                                 self.aruco_dictionary,
                                                                 parameters=self.aruco_parameters)
+
+        # cv2.aruco.refineDetectedMarkers(cv_image, self.board, corners, marker_ids, rejected)
         if marker_ids is not None:
 
             if cv2.__version__ > '4.0.0':
